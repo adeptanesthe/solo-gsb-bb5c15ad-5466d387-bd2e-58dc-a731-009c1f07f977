@@ -173,7 +173,11 @@ export default function App() {
 
           <section className="col-right">
             <BindingsPanel review={review} />
-            <KeySimulator key={'sim-' + (selectedContext?.id || 'none')} selectedContext={selectedContext} />
+            <KeySimulator
+              key={'sim-' + (selectedContext?.id || 'none')}
+              selectedContext={selectedContext}
+              review={review}
+            />
           </section>
         </div>
       )}

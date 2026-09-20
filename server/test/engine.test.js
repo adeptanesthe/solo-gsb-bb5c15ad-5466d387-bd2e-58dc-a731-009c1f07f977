@@ -7,6 +7,7 @@ const {
   minimumSetCover,
   conflictGoalId,
   previewSandbox,
+  replayTimeline,
 } = require('../src/engine');
 
 let passed = 0;
@@ -117,6 +118,133 @@ test('逐键模拟：duplicate 命中时 triggered 含双方', () => {
   assert.equal(r.status, 'triggered');
   const ids = r.triggered.map((t) => t.commandId).sort();
   assert.deepEqual(ids, ['c5', 'c6']);
+});
+
+// ---------- 时序回放 ----------
+const replayState = {
+  contexts: [{ id: 'r', parentId: null, name: 'R' }],
+  commands: [
+    { id: 'short', contextId: 'r', name: 'go', sequenceTokens: ['g'], sequenceLabel: 'G', description: '' },
+    { id: 'long2', contextId: 'r', name: 'gd', sequenceTokens: ['g', 'd'], sequenceLabel: 'G D', description: '' },
+    { id: 'long3', contextId: 'r', name: 'gdd', sequenceTokens: ['g', 'd', 'd'], sequenceLabel: 'G D D', description: '' },
+    { id: 'solo', contextId: 'r', name: 'x-cmd', sequenceTokens: ['x'], sequenceLabel: 'X', description: '' },
+  ],
+};
+const P = (token, timeMs, timeoutMs) => (timeoutMs === undefined ? { token, timeMs } : { token, timeMs, timeoutMs });
+
+test('时序回放：阈值内续键沿前缀链推进（短序列不触发），截止时刻逐键重置', () => {
+  // g@0 pending(G)；d@500 精确命中 G D 且仍是 G D D 前缀 => 继续 pending(G D)，
+  // 截止时刻以 d 的时刻重置为 1300；时间线结束超时触发 G D（而不是 G）
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 0), P('d', 500)] }, { timeoutMs: 800 });
+  assert.equal(r.events.length, 3);
+  assert.equal(r.events[0].status, 'pending');
+  assert.deepEqual(r.events[0].held.map((c) => c.commandId), ['short']);
+  assert.equal(r.events[0].candidates.length, 2); // G D、G D D
+  assert.equal(r.events[1].status, 'pending');
+  assert.deepEqual(r.events[1].held.map((c) => c.commandId), ['long2']);
+  assert.equal(r.events[2].type, 'timeout');
+  assert.equal(r.events[2].timeMs, 1300); // 500 + 800，截止时刻逐键重置
+  assert.deepEqual(r.events[2].triggered.map((c) => c.commandId), ['long2']);
+});
+
+test('时序回放：超时触发短序列，并记录超时事件的时间点', () => {
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 100)] }, { timeoutMs: 800 });
+  assert.equal(r.events.length, 2);
+  assert.equal(r.events[0].status, 'pending');
+  assert.equal(r.events[1].type, 'timeout');
+  assert.equal(r.events[1].status, 'timeout');
+  assert.equal(r.events[1].timeMs, 900); // 100 + 800
+  assert.deepEqual(r.events[1].triggered.map((c) => c.commandId), ['short']);
+  assert.equal(r.fired[0].atMs, 900);
+});
+
+test('时序回放：阈值外续键先补发短序列，续键作为新输入重新判定', () => {
+  // g@0 待定，d@900 超过 800ms：800ms 超时触发 G；d 单独无匹配
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 0), P('d', 900)] }, { timeoutMs: 800 });
+  assert.equal(r.events[0].status, 'pending');
+  assert.equal(r.events[1].type, 'timeout');
+  assert.equal(r.events[1].timeMs, 800);
+  assert.deepEqual(r.events[1].triggered.map((c) => c.commandId), ['short']);
+  assert.equal(r.events[2].status, 'no-match');
+  assert.equal(r.events[2].restartFrom, false); // 超时已清空缓冲，d 是全新输入
+  // 最终只触发过短序列一次
+  assert.deepEqual(r.fired.map((f) => f.atMs), [800]);
+});
+
+test('时序回放：无匹配从当前按键重新起算，不吞键（当前键可独立命中）', () => {
+  // z 无匹配被丢弃后按 x：x 独立命中，事件携带 restartFrom
+  const r = replayTimeline(replayState, 'r', { presses: [P('z', 0), P('x', 10)] });
+  assert.equal(r.events[0].status, 'no-match');
+  assert.equal(r.events[0].restartFrom, false);
+  assert.equal(r.events[1].status, 'triggered');
+  assert.equal(r.events[1].restartFrom, true);
+  assert.deepEqual(r.events[1].triggered.map((c) => c.commandId), ['solo']);
+  assert.equal(r.events[1].discardedLabel, 'X'); // 上一键已在 no-match 事件中丢弃
+});
+
+test('时序回放：待定中续键偏离长序列则放弃短序列并从当前键重新起算', () => {
+  // g@0 待定，x@100 不匹配任何 G 延伸：短序列不触发（被放弃），x 重新起算命中
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 0), P('x', 100)] }, { timeoutMs: 800 });
+  assert.equal(r.events[0].status, 'pending');
+  assert.equal(r.events[1].status, 'triggered');
+  assert.equal(r.events[1].restartFrom, true);
+  assert.deepEqual(r.events[1].triggered.map((c) => c.commandId), ['solo']);
+  assert.deepEqual(r.events[1].droppedHeld, ['short']);
+  assert.equal(r.firedCount, 1); // 短序列被放弃，仅 x 触发
+});
+
+test('时序回放：三级前缀链 pending → pending → 长序列触发', () => {
+  // g@0 pending，d@100：同时精确命中 G D 且是 G D D 前缀 => 仍 pending；
+  // d@200：触发 G D D
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 0), P('d', 100), P('d', 200)] }, { timeoutMs: 800 });
+  assert.equal(r.events[0].status, 'pending');
+  assert.equal(r.events[1].status, 'pending');
+  assert.deepEqual(r.events[1].held.map((c) => c.commandId), ['long2']);
+  assert.equal(r.events[2].status, 'triggered');
+  assert.deepEqual(r.events[2].triggered.map((c) => c.commandId), ['long3']);
+  assert.equal(r.status, 'idle');
+});
+
+test('时序回放：每键可用自身 timeoutMs 覆盖全局阈值', () => {
+  const r = replayTimeline(replayState, 'r', { presses: [P('g', 0, 300)] }, { timeoutMs: 800 });
+  assert.equal(r.timeoutMs, 800); // 回显全局阈值
+  assert.equal(r.events[0].timeoutMs, 300); // 该键实际生效阈值
+  assert.equal(r.events[1].timeMs, 300);
+  assert.equal(r.events[1].timeoutMs, 300);
+});
+
+test('时序回放：纯等待超过全局阈值不会误触发（无待定短序列）', () => {
+  // 只有长前缀、无短序列命中的上下文：等待结束不产生任何触发
+  const st2 = {
+    contexts: [{ id: 'r', parentId: null, name: 'R' }],
+    commands: [
+      { id: 'z1', contextId: 'r', name: 'zab', sequenceTokens: ['z', 'a', 'b'], sequenceLabel: 'Z A B', description: '' },
+    ],
+  };
+  const r = replayTimeline(st2, 'r', { presses: [P('z', 0), P('a', 100)] }, { timeoutMs: 800 });
+  assert.equal(r.events[0].status, 'waiting');
+  assert.equal(r.events[1].status, 'waiting');
+  assert.equal(r.firedCount, 0);
+  assert.equal(r.status, 'waiting');
+  // 末尾不补发 timeout 事件
+  assert.ok(r.events.every((e) => e.type === 'press'));
+});
+
+test('时序回放：非法输入被拒绝（400）', () => {
+  assert.throws(() => replayTimeline(replayState, 'r', {}), /presses/);
+  assert.throws(() => replayTimeline(replayState, 'r', { presses: [] }), /至少需要一次/);
+  assert.throws(
+    () => replayTimeline(replayState, 'r', { presses: [P('g', 10), P('d', 5)] }),
+    /单调不减/,
+  );
+  assert.throws(
+    () => replayTimeline(replayState, 'r', { presses: [{ token: 'g', timeMs: -1 }] }),
+    /timeMs/,
+  );
+  assert.throws(
+    () => replayTimeline(replayState, 'r', { presses: [P('g', 0, -3)] }),
+    /timeoutMs/,
+  );
 });
 
 test('上下文路径展示双方来源', () => {

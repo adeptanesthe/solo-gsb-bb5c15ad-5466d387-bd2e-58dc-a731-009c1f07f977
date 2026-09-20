@@ -359,6 +359,311 @@ function evaluateKey(state, contextId, bufferTokens) {
   return { status: 'no-match', buffer, bufferLabel, triggered: [], candidates: [], effective: eff };
 }
 
+const DEFAULT_REPLAY_TIMEOUT_MS = 800;
+
+/** 把生效组映射为逐键候选（还差几键） */
+function groupToCandidate(g, bufferLength) {
+  return {
+    sequenceLabel: g.label,
+    sequenceTokens: g.tokens,
+    commands: g.commands.map((rec) => ({
+      commandId: rec.cmd.id,
+      name: rec.cmd.name,
+      contextPath: rec.contextPath,
+      contextId: rec.contextId,
+    })),
+    remaining: g.tokens.length - bufferLength,
+  };
+}
+
+/** 把精确命中的生效组展开为触发命令负载（含 duplicate 标记） */
+function groupsToTriggered(exactGroups) {
+  const triggered = [];
+  for (const g of exactGroups) {
+    for (const rec of g.commands) {
+      triggered.push({
+        commandId: rec.cmd.id,
+        name: rec.cmd.name,
+        description: rec.cmd.description || '',
+        contextPath: rec.contextPath,
+        sequenceLabel: g.label,
+        duplicate: g.duplicate,
+      });
+    }
+  }
+  return triggered;
+}
+
+const badReplay = (message) => Object.assign(new Error(message), { status: 400 });
+
+/**
+ * 时序回放：按带相对时间戳的按键时间线，复用 computeEffective 的生效绑定判定。
+ *
+ * 规则：
+ * - 短序列既精确命中又是更长生效序列前缀时进入 pending（待定）；阈值内续键匹配
+ *   长序列则触发长序列，超过当前按键配置的阈值则超时触发短序列；
+ * - 无任何匹配时丢弃旧缓冲、从当前按键重新起算（restart），不吞键；
+ * - 每次按键/超时产出一个事件，事件按其在时间线上发生的时刻排序。
+ *
+ * options:
+ *   timeoutMs: 全局超时阈值（毫秒，默认 800）；每次按键可用自身 timeoutMs 覆盖
+ * input:
+ *   { presses: [{ token | press, timeMs, timeoutMs? }] }
+ */
+function replayTimeline(state, contextId, input, options = {}) {
+  const globalTimeout = Number.isFinite(Number(options.timeoutMs))
+    ? Number(options.timeoutMs)
+    : DEFAULT_REPLAY_TIMEOUT_MS;
+  if (!Number.isInteger(globalTimeout) || globalTimeout < 0) {
+    throw badReplay('超时阈值必须是非负整数毫秒');
+  }
+
+  const rawPresses = Array.isArray(input?.presses) ? input.presses : null;
+  if (!rawPresses) throw badReplay('回放需要 presses（带时间戳的按键数组）');
+  if (rawPresses.length === 0) throw badReplay('回放至少需要一次按键');
+
+  const presses = [];
+  for (const p of rawPresses) {
+    const rawPress = p && typeof p === 'object' ? p.press ?? p.token : p;
+    const canonical = canonicalPress(rawPress);
+    if (!canonical.ok) throw badReplay(`第 ${presses.length + 1} 次按键无效：${canonical.error}`);
+    const t = Number(p && p.timeMs);
+    if (!Number.isFinite(t) || t < 0) throw badReplay(`第 ${presses.length + 1} 次按键的 timeMs 必须是非负数`);
+    let timeoutMs = globalTimeout;
+    if (p && p.timeoutMs !== undefined && p.timeoutMs !== null) {
+      timeoutMs = Number(p.timeoutMs);
+      if (!Number.isInteger(timeoutMs) || timeoutMs < 0) {
+        throw badReplay(`第 ${presses.length + 1} 次按键的 timeoutMs 必须是非负整数毫秒`);
+      }
+    }
+    presses.push({ token: canonical.token, pretty: canonical.pretty, timeMs: t, timeoutMs });
+  }
+  for (let i = 1; i < presses.length; i++) {
+    if (presses[i].timeMs < presses[i - 1].timeMs) {
+      throw badReplay(`第 ${i + 1} 次按键的时间早于上一次，时间线必须单调不减`);
+    }
+  }
+
+  const eff = computeEffective(state, contextId);
+  const groups = eff.effectiveGroups;
+  const events = [];
+  let buffer = [];
+  let pending = null; // { commands, groups, deadlineMs, timeoutMs } 待定的短序列
+  let lastEventTime = 0;
+  let prevNoMatch = false; // 上一按键完全无匹配（已丢弃），下一按键需标记重新起算
+
+  const emit = (event) => {
+    events.push({
+      seq: events.length + 1,
+      timeMs: event.timeMs,
+      deltaMs: event.timeMs - lastEventTime,
+      ...event,
+    });
+    lastEventTime = event.timeMs;
+  };
+
+  /** 超时结算待定短序列；pending 被消费后置空 */
+  const flushPending = () => {
+    const held = pending;
+    pending = null;
+    prevNoMatch = false;
+    emit({
+      type: 'timeout',
+      timeMs: held.deadlineMs,
+      status: 'timeout',
+      buffer: [...held.groups[0].tokens],
+      bufferLabel: held.groups[0].label,
+      token: null,
+      pretty: null,
+      note: `超过 ${held.timeoutMs}ms 未续键，触发待定短序列`,
+      timeoutMs: held.timeoutMs,
+      triggered: groupsToTriggered(held.groups),
+      candidates: [],
+      held: [],
+      restartFrom: false,
+    });
+    buffer = [];
+  };
+
+  for (const press of presses) {
+    // 续键到达时待定阈值已到：先补发超时事件，触发短序列
+    if (pending && press.timeMs > pending.deadlineMs) flushPending();
+
+    const timeoutMs = press.timeoutMs;
+    const restarted = buffer.length > 0 || prevNoMatch; // 当前键之前已有（未结算的）缓冲
+    // 重新起算时被丢弃的内容：含此前缓冲 + 追加当前键后仍不匹配的完整串
+    const discardedTokens = [...buffer, press.token];
+    const discardedLabel = discardedTokens.map((t) => pressToPretty(t)).join(' ');
+    const droppedHeld = pending ? pending.commands.map((c) => c.commandId) : [];
+
+    buffer = [...buffer, press.token];
+    const bufferLabel = buffer.map((t) => pressToPretty(t)).join(' ');
+
+    const exact = groups.filter(
+      (g) => g.tokens.length === buffer.length && g.tokens.every((t, i) => t === buffer[i]),
+    );
+    const prefixed = groups.filter((g) => isPrefix(buffer, g.tokens));
+
+    const base = {
+      type: 'press',
+      timeMs: press.timeMs,
+      token: press.token,
+      pretty: press.pretty,
+      timeoutMs,
+    };
+    const restartInfo = restarted
+      ? { restartFrom: true, discardedTokens: [...buffer], discardedLabel, droppedHeld }
+      : { restartFrom: false };
+    const restartNote = (tail) =>
+      restarted ? `旧缓冲 ${discardedLabel} 无匹配，从当前按键重新起算；${tail}` : tail;
+
+    if (exact.length > 0 && prefixed.length > 0) {
+      // 精确命中短序列且是更长序列前缀：进入待定，不立即触发
+      const held = groupsToTriggered(exact);
+      pending = { commands: held, groups: exact, deadlineMs: press.timeMs + timeoutMs, timeoutMs };
+      prevNoMatch = false;
+      emit({
+        ...base,
+        ...restartInfo,
+        buffer: [...buffer],
+        bufferLabel,
+        status: 'pending',
+        note: restarted
+          ? restartNote(`精确命中且为前缀，待定 ${timeoutMs}ms`)
+          : `精确命中且为更长序列前缀，${timeoutMs}ms 内续键触发长序列，超时触发短序列`,
+        triggered: [],
+        candidates: prefixed.map((g) => groupToCandidate(g, buffer.length)),
+        held,
+      });
+    } else if (exact.length > 0) {
+      pending = null;
+      prevNoMatch = false;
+      buffer = [];
+      emit({
+        ...base,
+        ...restartInfo,
+        buffer: restarted ? [press.token] : [...buffer],
+        bufferLabel: restarted ? press.pretty : bufferLabel,
+        status: 'triggered',
+        note: restarted ? restartNote('当前按键精确命中') : '',
+        triggered: groupsToTriggered(exact),
+        candidates: [],
+        held: [],
+      });
+    } else if (prefixed.length > 0 && buffer.length < MAX_PRESSES) {
+      // 纯前缀等待：保留此前待定短序列的截止时刻（若有）
+      prevNoMatch = false;
+      emit({
+        ...base,
+        ...restartInfo,
+        buffer: [...buffer],
+        bufferLabel,
+        status: 'waiting',
+        note: restarted
+          ? restartNote('当前按键构成更长序列前缀')
+          : pending
+            ? `待定短序列保留至 ${pending.deadlineMs}ms，继续续键匹配长序列`
+            : '已构成更长序列的前缀，等待后续按键',
+        triggered: [],
+        candidates: prefixed
+          .map((g) => groupToCandidate(g, buffer.length))
+          .sort((a, b) => a.remaining - b.remaining),
+        held: pending ? pending.commands : [],
+      });
+    } else {
+      // 无匹配：丢弃全部旧缓冲（含待定短序列），从当前按键单独重新判定，避免吞键
+      pending = null;
+      buffer = [press.token];
+      const reExact = groups.filter((g) => g.tokens.length === 1 && g.tokens[0] === press.token);
+      const rePrefixed = groups.filter((g) => isPrefix([press.token], g.tokens));
+
+      if (reExact.length > 0 && rePrefixed.length > 0) {
+        const held = groupsToTriggered(reExact);
+        pending = { commands: held, groups: reExact, deadlineMs: press.timeMs + timeoutMs, timeoutMs };
+        prevNoMatch = false;
+        emit({
+          ...base,
+          ...restartInfo,
+          buffer: [press.token],
+          bufferLabel: press.pretty,
+          status: 'pending',
+          note: restartNote(`精确命中且为前缀，待定 ${timeoutMs}ms`),
+          triggered: [],
+          candidates: rePrefixed.map((g) => groupToCandidate(g, 1)),
+          held,
+        });
+      } else if (reExact.length > 0) {
+        buffer = [];
+        prevNoMatch = false;
+        emit({
+          ...base,
+          ...restartInfo,
+          buffer: [press.token],
+          bufferLabel: press.pretty,
+          status: 'triggered',
+          note: restarted ? restartNote('当前按键精确命中') : '',
+          triggered: groupsToTriggered(reExact),
+          candidates: [],
+          held: [],
+        });
+      } else if (rePrefixed.length > 0) {
+        prevNoMatch = false;
+        emit({
+          ...base,
+          ...restartInfo,
+          buffer: [press.token],
+          bufferLabel: press.pretty,
+          status: 'waiting',
+          note: restarted ? restartNote('当前按键构成更长序列前缀') : '',
+          triggered: [],
+          candidates: rePrefixed
+            .map((g) => groupToCandidate(g, 1))
+            .sort((a, b) => a.remaining - b.remaining),
+          held: [],
+        });
+      } else {
+        // 当前键单独也无匹配：完全丢弃（buffer 清空），下一按键重新起算且不吞键
+        buffer = [];
+        pending = null;
+        prevNoMatch = true;
+        emit({
+          ...base,
+          ...restartInfo,
+          buffer: [],
+          bufferLabel: '',
+          status: 'no-match',
+          note: restarted
+            ? `旧缓冲 ${discardedLabel} 无匹配，当前按键也不匹配，已丢弃并从下一次按键重新起算`
+            : '无任何匹配序列，已丢弃并从下一次按键重新起算',
+          triggered: [],
+          candidates: [],
+          held: [],
+        });
+      }
+    }
+  }
+
+  // 时间线结束时仍有待定短序列：超时触发
+  if (pending) flushPending();
+
+  const fired = events
+    .filter((e) => e.triggered.length > 0)
+    .map((e) => ({ atMs: e.timeMs, eventType: e.type, commands: e.triggered }));
+
+  return {
+    format: 'shortcut-replay-v1',
+    contextId,
+    contextPath: eff.contextPath,
+    timeoutMs: globalTimeout,
+    pressCount: presses.length,
+    status: prevNoMatch ? 'no-match' : pending ? 'pending' : buffer.length > 0 ? 'waiting' : 'idle',
+    durationMs: events.length > 0 ? events[events.length - 1].timeMs : 0,
+    firedCount: fired.length,
+    events,
+    fired,
+  };
+}
+
 /** 收集某上下文子树内的全部叶子上下文（无子上下文） */
 function descendantLeaves(index, contextId) {
   const start = index.byId.get(contextId);
@@ -997,6 +1302,8 @@ module.exports = {
   contextPath,
   computeEffective,
   evaluateKey,
+  replayTimeline,
+  DEFAULT_REPLAY_TIMEOUT_MS,
   descendantLeaves,
   conflictGoalId,
   minimumSetCover,

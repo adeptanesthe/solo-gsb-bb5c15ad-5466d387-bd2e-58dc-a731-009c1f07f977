@@ -1,6 +1,6 @@
 # ⌨ 上下文快捷键审校台（Node.js + React）
 
-为命令式快捷键体系提供的可视化审校工具：建立**上下文树**，为命令指定所属上下文与由 **1～3 次按键**组成的序列；选择任一上下文后，系统按**最近祖先规则**构建生效绑定，自动标出**同层重复**与**前缀冲突**，并提供**逐键模拟器**实时查看候选、触发与等待状态。此外可一键**生成回归测试套件**：以全部叶子上下文为候选，用精确集合覆盖选出叶子数量最少的测试上下文集合。新增的**变更沙盒**支持把命令的新增、改序列、删除先暂存为浏览器本地草案，后端在同一份草案上预演基线与模拟状态，按上下文汇总各项差异，改动确认前不触碰任何真实数据。
+为命令式快捷键体系提供的可视化审校工具：建立**上下文树**，为命令指定所属上下文与由 **1～3 次按键**组成的序列；选择任一上下文后，系统按**最近祖先规则**构建生效绑定，自动标出**同层重复**与**前缀冲突**，并提供**逐键模拟器**实时查看候选、触发与等待状态。模拟器内含**时序回放**：录制带相对毫秒与可配置超时阈值的按键时间线，短序列既是精确命中又是长序列前缀时先进入待定，阈值内续键触发长序列、超时触发短序列，无匹配则从当前按键重新起算不吞键，并支持 JSON 导入/导出。此外可一键**生成回归测试套件**：以全部叶子上下文为候选，用精确集合覆盖选出叶子数量最少的测试上下文集合。新增的**变更沙盒**支持把命令的新增、改序列、删除先暂存为浏览器本地草案，后端在同一份草案上预演基线与模拟状态，按上下文汇总各项差异，改动确认前不触碰任何真实数据。
 
 ## 一条命令启动（Docker Compose）
 
@@ -70,6 +70,21 @@ npm run test:engine  # 运行引擎单测（最近祖先 / 覆盖 / 重复 / 前
 - `no-match`（红）：既未精确命中也不是任何序列前缀；
 - `idle`：尚未输入。
 
+### 时序回放（带超时的时间线）
+
+模拟器顶部切换到「时序回放」页签。每次按键都会记录**相对首键的毫秒时间戳**与该键生效的**超时阈值**（页面顶部配置默认阈值，表格中可逐键覆盖）：
+
+1. **录制 / 编辑**：点「开始录制」后按键即自动计时（Esc 结束、Backspace 删末键）；也可直接在按键表中改每个键的相对时间与阈值。
+2. **待定判定**：某一键精确命中短序列、且短序列同时是更长生效序列的严格前缀时进入 **pending（待定，紫）**，不立即触发：
+   - **阈值内续键**且续键匹配长序列：沿前缀链继续（仍为更长链前缀时保持待定，截止时刻以最新按键重置），补全长序列即 **triggered**；
+   - **超过该键阈值仍未有效续键**：在截止时刻自动补发一个 `timeout` 事件，**触发待定的短序列**（同层重复时全部触发）；
+   - 续键偏离长序列：放弃待定短序列，**从当前按键重新起算**——当前键自身命中/为前缀则立即按新序列判定，不吞掉该键。
+3. **无匹配重新起算**：缓冲既不命中也不是前缀时标记 `no-match` 并丢弃；下一次按键作为全新序列起点（行内标「↻ 重新起算」），保证任何按键都不会被静默吞掉。
+4. **回放与展示**：「回放」直接给出全部逐事件状态；「按时间线播放」按事件时刻逐条揭示。事件表给出每次按键/超时的**时刻、距上事件间隔、输入、缓冲、状态与说明**，底部汇总**最终触发命令与各自触发时间点**。
+5. **JSON 导入 / 导出**：导出录制定义（`shortcut-replay-v1`，含 `contextId / timeoutMs / presses[{token,timeMs,timeoutMs}]`）；导入时校验时间单调不减，若文件录制于其他上下文则按当前上下文回放并提示。也可用「示例：阈值内续键 / 示例：超时」一键填充当前上下文的前缀冲突序列。
+
+> 时序回放是**只读**能力：判定完全复用与即时模拟相同的 `computeEffective` 生效绑定规则（最近祖先 / shadowed / duplicate / prefix），不改变任何数据。即时模拟页签、`POST /api/simulate` 与 Docker Compose 启动方式均保持不变。
+
 ## 回归套件生成
 
 顶部切换到「🧪 回归套件生成」页（只读，不改动任何审校/模拟逻辑）：
@@ -118,6 +133,7 @@ npm run test:engine  # 运行引擎单测（最近祖先 / 覆盖 / 重复 / 前
 | POST/PUT/DELETE | `/api/commands[/:id]` | 命令增改删，服务端校验序列合法性（1~3 键、组合键合法） |
 | GET | `/api/review/:contextId` | 生效绑定、祖先链、冲突清单、shadowed 绑定 |
 | POST | `/api/simulate/:contextId` | 逐键模拟，body：`{"buffer":["g","d"]}` 或 `{"presses":"g d"}` |
+| POST | `/api/replay/:contextId` | 时序回放（只读）：body 为带时间戳的按键时间线，返回逐事件状态、超时事件与最终触发命令及时间点；加 `?download=1` 返回附件响应头 |
 | GET | `/api/regression-suite` | 回归套件（统计 + 入选用例 + 候选覆盖数 + 不可触发命令原因）；加 `?download=1` 返回 `Content-Disposition: attachment` 响应头 |
 | POST | `/api/sandbox/preview` | 变更沙盒预演（只读，不写数据文件）：body 为草案，返回基线 vs 模拟状态的按上下文差异；加 `?download=1` 返回附件响应头 |
 
@@ -208,6 +224,55 @@ npm run test:engine  # 运行引擎单测（最近祖先 / 覆盖 / 重复 / 前
 }
 ```
 
+`POST /api/replay/:contextId` 请求体（前端「导出 JSON」的格式与此一致）：
+
+```jsonc
+{
+  "timeoutMs": 800,                         // 默认超时阈值（毫秒）
+  "presses": [
+    { "token": "g", "timeMs": 0 },          // timeMs：相对时间线起点的毫秒
+    { "token": "d", "timeMs": 500, "timeoutMs": 600 }  // 可逐键覆盖默认阈值
+  ]
+}
+```
+
+返回结构：
+
+```jsonc
+{
+  "format": "shortcut-replay-v1",
+  "contextId": "ctx-code",
+  "contextPath": "App / Editor / Code Editor",
+  "timeoutMs": 800,
+  "pressCount": 2,
+  "durationMs": 500,
+  "firedCount": 1,
+  "status": "idle",                         // 时间线结束态：idle / waiting / pending / no-match
+  "events": [
+    {
+      "seq": 1, "type": "press", "timeMs": 0, "deltaMs": 0,
+      "token": "g", "pretty": "G", "buffer": ["g"], "bufferLabel": "G", "timeoutMs": 800,
+      "status": "pending",                  // idle | pending | waiting | triggered | timeout | no-match
+      "note": "精确命中且为更长序列前缀，800ms 内续键触发长序列，超时触发短序列",
+      "triggered": [],
+      "held": [ { "commandId": "…", "name": "跳转定义…", "sequenceLabel": "G" } ], // 待定短序列
+      "candidates": [ /* 更长前缀候选，结构同 /api/simulate */ ],
+      "restartFrom": false
+    },
+    {
+      "seq": 2, "type": "press", "timeMs": 500, "deltaMs": 500,
+      "status": "triggered",
+      "triggered": [ { "commandId": "…", "name": "跳到类型定义", "contextPath": "…", "sequenceLabel": "G D", "duplicate": false } ]
+    }
+  ],
+  "fired": [ { "atMs": 500, "eventType": "press", "commands": [ /* 同 events[].triggered */ ] } ]
+}
+```
+
+- 超时自动补发的事件 `type` 为 `"timeout"`，`timeMs` 为截止时刻（短序列末键时刻 + 该键阈值），`triggered` 为待定短序列（同层重复时多条）；
+- 无匹配后重新起算的事件 `restartFrom: true`，并带 `discardedTokens / discardedLabel / droppedHeld`（被放弃的缓冲与待定命令）。
+- 阈值为负、时间戳倒退、按键非法、presses 为空等均返回 `400`。
+
 ## 目录结构
 
 ```
@@ -225,7 +290,8 @@ npm run test:engine  # 运行引擎单测（最近祖先 / 覆盖 / 重复 / 前
     ├── src/
     │   ├── App.jsx
     │   ├── api.js
+    │   ├── keymap.js          # 浏览器按键事件 -> 引擎 token
     │   ├── styles.css
-    │   └── components/       # 上下文树 / 命令面板 / 绑定与冲突 / 逐键模拟器 / 回归套件 / 变更沙盒
+    │   └── components/       # 上下文树 / 命令面板 / 绑定与冲突 / 逐键模拟（即时+时序回放） / 回归套件 / 变更沙盒
     └── vite.config.js
 ```
