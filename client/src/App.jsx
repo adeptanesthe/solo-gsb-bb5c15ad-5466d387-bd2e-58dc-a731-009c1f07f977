@@ -6,6 +6,7 @@ import BindingsPanel from './components/BindingsPanel';
 import KeySimulator from './components/KeySimulator';
 import RegressionSuite from './components/RegressionSuite';
 import Sandbox from './components/Sandbox';
+import TimelineReplay from './components/TimelineReplay';
 
 export default function App() {
   const [state, setState] = useState({ contexts: [], commands: [] });
@@ -13,7 +14,7 @@ export default function App() {
   const [review, setReview] = useState(null);
   const [globalError, setGlobalError] = useState('');
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState('review'); // review | regression | sandbox
+  const [view, setView] = useState('review'); // review | replay | regression | sandbox
 
   const refresh = useCallback(async () => {
     const s = await api.getState();
@@ -123,6 +124,12 @@ export default function App() {
             📝 审校与模拟
           </button>
           <button
+            className={view === 'replay' ? 'tab active' : 'tab'}
+            onClick={() => setView('replay')}
+          >
+            🎞 时序回放
+          </button>
+          <button
             className={view === 'regression' ? 'tab active' : 'tab'}
             onClick={() => setView('regression')}
           >
@@ -142,6 +149,10 @@ export default function App() {
       {view === 'sandbox' ? (
         <div className="regression-layout">
           <Sandbox state={state} onRefresh={refresh} />
+        </div>
+      ) : view === 'replay' ? (
+        <div className="regression-layout">
+          <TimelineReplay state={state} initialContextId={selectedId} />
         </div>
       ) : view === 'regression' ? (
         <div className="regression-layout">

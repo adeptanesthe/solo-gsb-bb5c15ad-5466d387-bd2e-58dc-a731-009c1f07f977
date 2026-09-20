@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const express = require('express');
 const cors = require('cors');
 const store = require('./store');
-const { computeEffective, evaluateKey, canonicalPress, generateRegressionSuite, previewSandbox } = require('./engine');
+const { computeEffective, evaluateKey, canonicalPress, generateRegressionSuite, previewSandbox, replayTimeline } = require('./engine');
 
 const app = express();
 app.use(cors());
@@ -88,6 +88,24 @@ app.post(
       throw Object.assign(new Error('请提供 buffer（按键 token 数组）或 presses（按键串）'), { status: 400 });
     }
     res.json(evaluateKey(store.snapshot(), req.params.contextId, tokens));
+  }),
+);
+
+// ---- 带超时阈值的时序回放（只读：按时间线复用生效绑定判定，不写数据） ----
+// POST body: { timeoutMs?: 800, presses: [{ press: "g", at: 0 }, { press: "d", at: 300 }] }
+//           也接受 presses 为按键串（"g l"，全部 at=0）；加 ?download=1 返回附件响应头
+app.post(
+  '/api/replay/:contextId',
+  wrap((req, res, next) => {
+    try {
+      const result = replayTimeline(store.snapshot(), req.params.contextId, req.body || {});
+      if (req.query.download !== undefined) {
+        res.setHeader('Content-Disposition', 'attachment; filename="timeline-replay.json"');
+      }
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
   }),
 );
 

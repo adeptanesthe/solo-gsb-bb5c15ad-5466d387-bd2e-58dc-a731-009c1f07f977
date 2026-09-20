@@ -931,6 +931,210 @@ select:focus {
   align-items: center;
 }
 
+/* ---------- 时序回放 ---------- */
+.replay-config {
+  display: flex;
+  gap: 14px;
+  padding: 12px 14px;
+  flex-wrap: wrap;
+  align-items: flex-end;
+}
+.replay-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 240px;
+}
+.replay-timeout-field {
+  flex: 0 0 260px;
+}
+.replay-timeout-field input {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+.replay-recorder {
+  margin: 0 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.replay-recorder .press-at {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+}
+.replay-recorder-actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+.replay-press-table td input {
+  padding: 4px 8px;
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+.gap-over {
+  color: var(--danger);
+  font-family: ui-monospace, monospace;
+}
+.gap-ok {
+  color: var(--ok);
+  font-family: ui-monospace, monospace;
+}
+.replay-summary {
+  padding: 10px 14px 0;
+}
+
+.sim-status.pending {
+  color: var(--purple);
+}
+.sim-status.pending .status-dot {
+  background: var(--purple);
+  animation: pulse 1s infinite;
+}
+.recorder.status-pending {
+  border-color: var(--purple);
+  box-shadow: 0 0 0 3px rgba(177, 140, 255, 0.12);
+}
+
+.replay-events {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.replay-event {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.replay-event.status-triggered {
+  border-color: rgba(62, 207, 142, 0.45);
+  background: rgba(62, 207, 142, 0.06);
+}
+.replay-event.status-pending {
+  border-color: rgba(177, 140, 255, 0.5);
+  background: rgba(177, 140, 255, 0.07);
+}
+.replay-event.status-waiting {
+  border-color: rgba(245, 181, 68, 0.45);
+  background: rgba(245, 181, 68, 0.05);
+}
+.replay-event.status-nomatch {
+  border-color: rgba(240, 107, 122, 0.45);
+  background: rgba(240, 107, 122, 0.05);
+}
+.replay-event.is-timeout {
+  border-style: dashed;
+}
+.replay-event-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.replay-event-index {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-family: ui-monospace, monospace;
+}
+.replay-event-time {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+.replay-event-time strong {
+  color: var(--text);
+  font-size: 13px;
+}
+.replay-event-key {
+  display: inline-flex;
+  align-items: center;
+}
+.replay-event .sim-status {
+  margin-top: 0;
+  font-size: 12px;
+}
+.replay-note {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.badge.replay-restart {
+  color: var(--accent);
+  border-color: rgba(91, 157, 255, 0.5);
+  background: rgba(91, 157, 255, 0.1);
+}
+.badge.replay-deadline {
+  color: var(--purple);
+  border-color: rgba(177, 140, 255, 0.45);
+  background: rgba(177, 140, 255, 0.1);
+}
+.replay-candidates {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.replay-candidates li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  background: rgba(0, 0, 0, 0.16);
+  border-radius: 7px;
+  padding: 5px 9px;
+}
+.replay-trigger-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.replay-trigger-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  background: rgba(62, 207, 142, 0.08);
+  border: 1px solid rgba(62, 207, 142, 0.3);
+  border-radius: 8px;
+  padding: 7px 10px;
+}
+.replay-trigger-time {
+  font-family: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+  font-weight: 700;
+  color: var(--ok);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.trigger-kind {
+  font-size: 10.5px;
+  border-radius: 20px;
+  padding: 1px 9px;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.trigger-kind.trig-exact {
+  color: var(--ok);
+  border-color: rgba(62, 207, 142, 0.45);
+  background: rgba(62, 207, 142, 0.1);
+}
+.trigger-kind.trig-continue {
+  color: var(--purple);
+  border-color: rgba(177, 140, 255, 0.45);
+  background: rgba(177, 140, 255, 0.1);
+}
+.trigger-kind.trig-timeout {
+  color: var(--warn);
+  border-color: rgba(245, 181, 68, 0.5);
+  background: rgba(245, 181, 68, 0.1);
+}
+
 /* ---------- 响应式 ---------- */
 @media (max-width: 1200px) {
   .layout {
